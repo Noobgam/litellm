@@ -14741,10 +14741,11 @@ async def count_request_tokens(
             verbose_proxy_logger.exception(
                 "litellm.proxy.proxy_server.token_counter(): Exception occured while getting deployment"
             )
-    if deployment is not None:
-        litellm_model_name = deployment.get("litellm_params", {}).get("model")
-        model_info = deployment.get("model_info", {})
-        load_credentials_from_list(deployment.get("litellm_params", {}))
+    request_deployment: Final = copy.deepcopy(deployment)
+    if request_deployment is not None:
+        litellm_model_name = request_deployment.get("litellm_params", {}).get("model")
+        model_info = request_deployment.get("model_info", {})
+        load_credentials_from_list(request_deployment.get("litellm_params", {}))
         # remove the custom_llm_provider_prefix in the litellm_model_name
         if "/" in litellm_model_name:
             litellm_model_name = litellm_model_name.split("/", 1)[1]
@@ -14753,7 +14754,7 @@ async def count_request_tokens(
         litellm_model_name if isinstance(litellm_model_name, str) and litellm_model_name else request.model
     )
     deployment_view: Final = _TOKEN_COUNT_DEPLOYMENT.validate_python(
-        deployment or _model_group_deployment(llm_router, request.model) or {}
+        request_deployment or _model_group_deployment(llm_router, request.model) or {}
     )
     settings: Final = await asyncify(resolve_token_count_settings)(
         configured=deployment_view.get("model_info", {}),
@@ -14764,14 +14765,14 @@ async def count_request_tokens(
     # Try provider-specific token counting first - only for non-direct requests (from provider endpoints)
     provider_counter: BaseTokenCounter | None = None
     custom_llm_provider: str | None = None
-    if call_endpoint is True and deployment is not None:
+    if call_endpoint is True and request_deployment is not None:
         # Auto-route to the correct provider based on model
-        provider_counter, _model, custom_llm_provider = _get_provider_token_counter(deployment, model_to_use)
+        provider_counter, _model, custom_llm_provider = _get_provider_token_counter(request_deployment, model_to_use)
         if _model is not None:
             model_to_use = _model
 
     conversation_empty: Final = not messages and not contents
-    if prompt and not conversation_empty and not _drops_params(deployment):
+    if prompt and not conversation_empty and not _drops_params(request_deployment):
         raise ProxyException(
             message="prompt cannot be sent with messages or contents. Set drop_params to count them without the prompt",
             type="invalid_request_error",
@@ -14791,7 +14792,7 @@ async def count_request_tokens(
                 custom_llm_provider,
                 messages=[{"role": "user", "content": prompt}] if prompt_as_message else messages,
                 contents=None if prompt_as_message else contents,
-                deployment=deployment,
+                deployment=request_deployment,
                 request_model=request.model,
                 tools=tools,
                 system=system,

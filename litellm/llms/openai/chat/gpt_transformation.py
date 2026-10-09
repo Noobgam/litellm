@@ -523,9 +523,43 @@ class OpenAIGPTConfig(BaseLLMModelInfo, BaseConfig):
         return {
             "model": model,
             "messages": messages,
-            **optional_params,
+            **self._drop_litellm_internal_params(optional_params),
             **self._sanitized_tools_update_for_openai(optional_params, litellm_params),
         }
+
+    @staticmethod
+    def _drop_litellm_internal_params(optional_params: dict) -> dict:
+        """Remove LiteLLM-internal kwargs that must never reach the provider.
+
+        ``transform_request`` serializes whatever is left in ``optional_params``
+        into the request body, and strict providers reject unknown fields: Bedrock
+        answers ``Unknown parameter: 'model_alias_map'`` with a 400 and fails the
+        whole request. ``get_litellm_params()`` emits that key unconditionally, so
+        it is present on every call, empty dict or not.
+
+        The names come from upstream's own list for the agentic-loop follow-up call
+        (``_FOLLOWUP_INTERNAL_PARAMS``), intersected with it so this can only ever
+        drop params upstream already classifies as internal, and the two lists
+        cannot drift. Imported lazily: a module-level import would be circular.
+
+        ``custom_llm_provider`` / ``acompletion`` / ``litellm_logging_obj`` are in
+        that list too but are deliberately NOT dropped here -- they are already
+        handled earlier on this path, and removing them would change behaviour
+        beyond the leak this fixes.
+        """
+        from litellm.litellm_core_utils.chat_completion_agentic_loop import (
+            _FOLLOWUP_INTERNAL_PARAMS,
+        )
+
+        internal: Final = {
+            "model_alias_map",
+            "custom_prompt_dict",
+            "stream_response",
+        } & set(_FOLLOWUP_INTERNAL_PARAMS)
+        if not internal:
+            return optional_params
+        return {k: v for k, v in optional_params.items() if k not in internal}
+
 
     async def async_transform_request(
         self,
@@ -557,7 +591,7 @@ class OpenAIGPTConfig(BaseLLMModelInfo, BaseConfig):
             return {
                 "model": model,
                 "messages": transformed_messages,
-                **optional_params,
+                **self._drop_litellm_internal_params(optional_params),
                 **self._sanitized_tools_update_for_openai(optional_params, litellm_params),
             }
         else:

@@ -25,6 +25,9 @@ from litellm.secret_managers.main import get_secret_str
 BEDROCK_MANTLE_DEFAULT_REGION: Final = "us-east-1"
 BEDROCK_REGIONS: Final = frozenset(AmazonBedrockGlobalConfig().get_all_regions())
 
+# Cross-region inference-profile prefixes (AWS CRIS), not regional URL prefixes.
+_CRIS_PREFIXES: Final = frozenset({"global", "us", "eu", "apac", "us-gov"})
+
 # Standard Mantle host: https://bedrock-mantle.<region>.api.aws (group 1 = region).
 MANTLE_HOST_RE: Final = re.compile(r"^https?://bedrock-mantle\.([^/.]+)\.api\.aws(?=/|$)", re.IGNORECASE)
 
@@ -137,6 +140,33 @@ def mantle_health_check_mode(model: str) -> Literal["anthropic_messages"] | None
     return "anthropic_messages" if is_mantle_claude_model(model) else None
 
 
+def _mantle_capability_entry(model: str | None, model_cost: dict) -> Mapping[str, object]:
+    """Preserve native Responses routing for region-qualified CRIS model IDs.
+
+    Keep upstream's us-east-1/<model> normalization, then look up the literal
+    profile before falling back to its unqualified model. register_model() may
+    canonicalize our registration onto an existing bare Runtime catalog key;
+    accept that spelling only when it explicitly belongs to this adapter.
+    An exact profile declaration wins, even when it disables Responses. Only
+    lookup keys change, never the wire model or regional pricing.
+    """
+    if not model:
+        return {}
+    _, model = split_mantle_region_prefix(model)
+    prefix, _, remainder = model.partition(".")
+    candidates: Final = (model, remainder) if remainder and prefix in _CRIS_PREFIXES else (model,)
+    for candidate in candidates:
+        entry: Final = model_cost.get(f"bedrock_mantle/{candidate}", {})
+        if entry:
+            return entry
+        canonical_entry: Final = model_cost.get(candidate, {})
+        if canonical_entry.get("litellm_provider") == "bedrock_mantle":
+            return canonical_entry
+    # Never borrow capabilities from bedrock_converse/openai/xai entries just
+    # because their model IDs resemble this deployment's wire ID.
+    return {}
+
+
 def mantle_supports_responses(model: str | None, model_cost: dict) -> bool:
     """Whether a Bedrock Mantle model can serve the native Responses API.
 
@@ -149,7 +179,7 @@ def mantle_supports_responses(model: str | None, model_cost: dict) -> bool:
     gpt-oss substring), so a substring gate would be wrong. A model absent from
     model_cost simply has no signal and returns False (chat-completions emulation).
     """
-    entry: Final = model_cost.get(f"bedrock_mantle/{split_mantle_region_prefix(model)[1]}", {}) if model else {}
+    entry: Final = _mantle_capability_entry(model, model_cost)
     if "/v1/responses" in (entry.get("supported_endpoints") or []):
         return True
     return entry.get("mode") == "responses"
@@ -166,5 +196,5 @@ def mantle_base_segment(model: str | None, model_cost: dict) -> str:
     the base for the model's whole OpenAI-compatible surface, so both the chat and
     responses configs derive from it -- there is no separate model-name rule.
     """
-    entry: Final = model_cost.get(f"bedrock_mantle/{split_mantle_region_prefix(model)[1]}", {}) if model else {}
+    entry: Final = _mantle_capability_entry(model, model_cost)
     return "openai/v1" if entry.get("use_openai_responses_path") is True else "v1"
